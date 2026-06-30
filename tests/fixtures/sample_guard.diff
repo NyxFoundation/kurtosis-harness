@@ -1,0 +1,34 @@
+PROP-val-eth-003 — negative control (E)
+
+Adds the consensus-spec upper-bound that grandine is missing in
+validate_gossip_rules. With this guard applied, a far-future-slot BeaconBlock
+is IGNOREd instead of being buffered into the unbounded delayed_until_slot
+BTreeMap, so the flood can no longer grow heap without bound.
+
+Spec: ethereum/consensus-specs p2p-interface.md, beacon_block gossip validation:
+  [IGNORE] signed_beacon_block.message.slot
+           <= current_slot + MAXIMUM_GOSSIP_CLOCK_DISPARITY_SLOTS
+
+This diff is the A/B control for the harness: build grandine with it applied to
+produce the "guarded" variant. If the symptom persists with this applied, the
+proposed root cause is wrong (verdict -> FALSE_POSITIVE_RISK).
+
+NOTE: line numbers track the commit pinned in TARGET_INFO.json; rebase the hunk
+if the pinned SHA moves.
+
+--- a/fork_choice_store/src/store.rs
++++ b/fork_choice_store/src/store.rs
+@@ -1156,6 +1156,14 @@ impl<P: Preset, S: Storage<P>> Store<P, S> {
+         // > Blocks cannot be in the future.
+         // > If they are, their consideration must be delayed until the are in the past.
+         if self.slot() < block.message().slot() {
++            // Negative-control guard for PROP-val-eth-003: the consensus
++            // gossip allowance is 500ms, i.e. less than one 12s devnet slot.
++            // Slot-granular validation therefore must not buffer blocks more
++            // than the next slot into the future.
++            let max_future_slot = self.slot().saturating_add(1);
++            if block.message().slot() > max_future_slot {
++                return Ok(Some(BlockAction::Ignore(false)));
++            }
+             return Ok(Some(BlockAction::DelayUntilSlot(block.clone_arc())));
+         }

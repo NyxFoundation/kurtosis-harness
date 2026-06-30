@@ -1,0 +1,31 @@
+{
+  "vuln_id": "PROP-val-eth-003",
+  "client": "grandine",
+  "attack_surface": "p2p-gossip",
+  "entry_point": "fork_choice_store/src/store.rs:1158",
+  "attacker_input": {
+    "driver": "p2p-gossip",
+    "generator": "far_future_slot_beacon_block_flood",
+    "params": {
+      "count": 500000,
+      "slot_offset": 1000000,
+      "unique_graffiti": true,
+      "per_item_bytes": 1024
+    }
+  },
+  "resource_signal": "rss",
+  "threshold": {
+    "metric": "rss_delta_mb",
+    "op": ">",
+    "value": 300
+  },
+  "keep_mitigations_on": [
+    "gossipsub_peer_scoring"
+  ],
+  "negative_control": {
+    "type": "patch",
+    "ref": "tests/fixtures/sample_guard.diff",
+    "description": "Enforce the consensus-spec upper bound in validate_gossip_rules: reject (IGNORE) blocks where message.slot > current_slot + MAXIMUM_GOSSIP_CLOCK_DISPARITY_SLOTS, so far-future blocks are never buffered into delayed_until_slot."
+  },
+  "spec_ref": "ethereum/consensus-specs p2p-interface.md#beacon_block \u2014 MAXIMUM_GOSSIP_CLOCK_DISPARITY"
+}
