@@ -10,6 +10,15 @@
 //   3. join the beacon_attestation_{subnet_id} mesh,
 //   4. publish a SingleAttestation with attester_index = 0xFFFFFFFF.
 //
+// KNOWN LIMITATION: 0xFFFFFFFF + a zeroed signature cannot reach the panic --
+// grandine verifies the BLS signature (public_key(state, attester_index)?)
+// BEFORE the fork-choice mutator, so a non-existent index is rejected at the
+// pubkey lookup. A faithful live reproduction needs a real validator deposited
+// after the justified checkpoint (index in [justified_len, target_len)) plus a
+// valid signature under the attacker's key. For a deterministic in-process
+// reproduction that satisfies these preconditions, see
+// probes/grandine_singleattestation_gap_index.{patch,py}.
+//
 // Required env:
 //   GR_CFG=/tmp/grandine-netcfg
 //   GR_TARGET=/ip4/127.0.0.1/tcp/<port>/p2p/<peer_id>
@@ -145,9 +154,13 @@ fn react(
 /// Build a crafted SingleAttestation with an out-of-band attester_index.
 ///
 /// We reuse a real AttestationData observed on gossip, then set attester_index
-/// to a value beyond the justified state's validator registry. The signature
-/// is zeroed — grandine validates BLS *after* the fork-choice mutator indexes
-/// justified_active_balances, so the panic fires before the signature check.
+/// to a value beyond the justified state's validator registry.
+///
+/// NOTE: with attester_index = 0xFFFFFFFF and a zeroed signature this is
+/// rejected at the pubkey lookup during signature validation, BEFORE the
+/// fork-choice mutator -- it does not panic. Reaching justified_active_balances
+/// requires a real gap-index validator and a valid signature; see the
+/// gap_index reproduction for the correct construction.
 fn craft_single_attestation(
     data: AttestationData,
     oob_index: u64,

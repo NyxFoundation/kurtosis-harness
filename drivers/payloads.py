@@ -189,15 +189,34 @@ def build_singleattestation_oob(
     source_root: bytes = b"\x00" * 32,
     target_epoch: int = 0,
     target_root: bytes = b"\x00" * 32,
+    signature: bytes = b"\x00" * 96,
 ) -> Payload:
-    """A SingleAttestation with an out-of-band attester_index.
+    """A SingleAttestation whose attester_index targets the unguarded
+    ``justified_active_balances[index]`` access (CHK-QW-02).
 
-    The attester_index is set to a value that exceeds the justified state's
-    validator registry length (the "post-justified-checkpoint validator" from
-    the finding), so the victim's unguarded ``justified_active_balances[index]``
-    panics with an out-of-bounds access. The signature is zeroed — grandine
-    validates the BLS signature *after* the fork-choice mutator indexes the
-    array, so the panic fires before the invalid signature is rejected.
+    WARNING -- signature ordering. Earlier revisions defaulted this to
+    ``attester_index=0xFFFFFFFF`` with a zeroed signature, on the assumption that
+    "grandine validates the BLS signature *after* the fork-choice mutator indexes
+    the array". That assumption is WRONG. grandine's singular path verifies the
+    signature (``validate_constructed_indexed_attestation`` ->
+    ``public_key(state, attester_index)?``) *before* the mutator, so a
+    non-existent index is rejected at the pubkey lookup and never reaches the
+    panic. This raw builder therefore cannot, on its own, reproduce the panic on
+    a live node.
+
+    The panic requires ``attester_index`` to be a REAL validator that is present
+    in the target-state registry (valid pubkey + attacker-held key, so the
+    signature verifies) yet beyond the justified-state registry length -- i.e. a
+    validator deposited after the justified checkpoint, ``index in
+    [justified_len, target_len)``. The Electra singular path performs no
+    committee-membership check, so such an attestation reaches the mutator and
+    indexes ``justified_active_balances[index]`` out of bounds.
+
+    For a working, deterministic end-to-end reproduction that satisfies these
+    preconditions (deposit choreography + real BLS signature), see
+    ``probes/grandine_singleattestation_gap_index.py``. This builder remains for
+    offline SSZ-shape tests and for callers that supply a real gap-index and a
+    valid ``signature``.
     """
     data = (
         _uint64_le(slot)
@@ -207,7 +226,7 @@ def build_singleattestation_oob(
         + _uint64_le(target_epoch) + target_root
     )
     assert len(data) == ATTESTATION_DATA_SIZE
-    signature = b"\x00" * 96
+    assert len(signature) == 96
     msg = _uint64_le(attester_index) + data + signature
     assert len(msg) == SINGLE_ATTESTATION_SIZE
     return Payload(
