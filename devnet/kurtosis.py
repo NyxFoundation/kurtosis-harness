@@ -296,13 +296,31 @@ class KurtosisHarness:
 
             try:
                 if spec.client == "grandine" and spec.attack_surface is AttackSurface.P2P_GOSSIP:
-                    from ..probes.grandine_libp2p_attack import run_grandine_libp2p_attack
+                    generator = spec.attacker_input.generator
+                    if generator == "singleattestation_oob_attester_index":
+                        from ..probes.grandine_singleattestation_attack import (
+                            run_singleattestation_attack,
+                        )
 
-                    run_grandine_libp2p_attack(
-                        enclave=enclave,
-                        count=int(spec.attacker_input.params.get("count", 100_000)),
-                        slot_offset=int(spec.attacker_input.params.get("slot_offset", 1_000_000)),
-                    )
+                        run_singleattestation_attack(
+                            enclave=enclave,
+                            attester_index=int(
+                                spec.attacker_input.params.get(
+                                    "attester_index", 0xFFFF_FFFF
+                                )
+                            ),
+                            subnet_id=int(spec.attacker_input.params.get("subnet_id", 0)),
+                        )
+                    else:
+                        from ..probes.grandine_libp2p_attack import (
+                            run_grandine_libp2p_attack,
+                        )
+
+                        run_grandine_libp2p_attack(
+                            enclave=enclave,
+                            count=int(spec.attacker_input.params.get("count", 100_000)),
+                            slot_offset=int(spec.attacker_input.params.get("slot_offset", 1_000_000)),
+                        )
                 else:
                     driver = get_driver(spec.attack_surface)
                     driver.emit(spec, target)

