@@ -49,6 +49,8 @@ class DryRunHarness:
             return self._run_rss(spec, variant)
         if spec.resource_signal is ResourceSignal.CPU:
             return self._run_cpu(spec, variant)
+        if spec.resource_signal is ResourceSignal.RESTART:
+            return self._run_restart(spec, variant)
         raise NotImplementedError(
             f"DryRunHarness does not model {spec.resource_signal} yet"
         )
@@ -74,6 +76,17 @@ class DryRunHarness:
         effective = self._effective_count(variant, count, guarded_floor=soft_limit)
         cpu_pct = min(99.0, 5.0 + 90.0 * min(1.0, effective / 100_000))
         return RunMetrics(cpu_pct=cpu_pct, reachable=True)
+
+    def _run_restart(self, spec: FindingSpec, variant: Variant) -> RunMetrics:
+        """Deterministic-crash model: a single malicious message triggers an
+        unguarded index/panic, crashing the process (restart_count=1). The
+        negative control (bounds/membership guard) rejects the message before
+        the panic (restart_count=0). Default mitigations (e.g. gossip peer
+        scoring) do NOT stop a single spec-valid-but-out-of-range message, so
+        the symptom survives ④ — this is a logic bug, not a flood.
+        """
+        crashes = 0 if variant is Variant.GUARDED else 1
+        return RunMetrics(restart_count=crashes, reachable=True)
 
     def _effective_count(
         self, variant: Variant, count: int, *, guarded_floor: int = 0

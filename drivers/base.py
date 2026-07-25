@@ -99,7 +99,8 @@ class WireDriver(_StubDriver):
 
 class GossipDriver(_StubDriver):
     surface = AttackSurface.P2P_GOSSIP
-    generators = ("far_future_slot_beacon_block_flood",)
+    generators = ("far_future_slot_beacon_block_flood",
+                  "singleattestation_oob_attester_index")
 
     def emit(self, spec: FindingSpec, target: DriverTarget) -> int:
         """Flood far-future-slot BeaconBlocks at the CL's Beacon API.
