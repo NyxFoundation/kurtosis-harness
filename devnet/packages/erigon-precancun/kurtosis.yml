@@ -1,0 +1,3 @@
+name: "github.com/nyx-foundation/erigon-precancun"
+description: |
+  Local historical-fork Erigon v2.41.0 dev chain for EthTotal lifecycle probes.

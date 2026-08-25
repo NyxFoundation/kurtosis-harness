@@ -1,0 +1,5 @@
+name: "github.com/nyx-foundation/besu-legacy"
+description: |
+  Single-node Besu Clique target with Amsterdam/EIP-6780 active at genesis.
+  The node produces PoA blocks locally, so this package does not require a
+  consensus client or an Engine API forkchoice call.

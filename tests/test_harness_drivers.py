@@ -12,6 +12,7 @@ import pytest
 
 from harness.devnet.kurtosis import DevnetUnavailable, KurtosisHarness
 from harness.drivers.base import (
+    BlockImportDriver,
     DRIVER_REGISTRY,
     DriverNotImplemented,
     DriverTarget,
@@ -45,6 +46,20 @@ def test_stub_driver_emit_raises_clearly():
     driver = get_driver(spec.attack_surface)
     with pytest.raises(DriverNotImplemented):
         driver.emit(spec, DriverTarget())
+
+
+def test_lifecycle_factory_embeds_destroy_then_refund_sequence():
+    child = BlockImportDriver._child_init()
+    init, runtime_len = BlockImportDriver._factory_init()
+
+    # The factory deployment init copies exactly the runtime, and the runtime
+    # embeds the child init at the declared CODECOPY offset.  DUP6 is the
+    # deliberate stack operation that reuses A as CALL's destination after
+    # the five CALL arguments have been pushed.
+    runtime = init[-runtime_len:]
+    assert runtime[42:] == child
+    assert runtime[0:7] == bytes([0x60, len(child), 0x60, 0x2A, 0x60, 0x00, 0x39])
+    assert runtime.count(bytes([0x85])) == 2  # DUP6 before the two CALLs
 
 
 def test_kurtosis_reports_unavailable_rather_than_faking():

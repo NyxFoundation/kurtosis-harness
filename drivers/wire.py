@@ -38,3 +38,21 @@ def encode_new_pooled_transaction_hashes_68(
     if not (len(types) == len(sizes) == len(hashes)):
         raise ValueError("types, sizes, hashes must be the same length")
     return encode([types, list(sizes), list(hashes)])
+
+
+def encode_get_block_headers(
+    request_id: int, start_hash: bytes, *, limit: int = 1,
+    skip: int = 0, reverse: bool = False,
+) -> bytes:
+    """eth request/response pair for GetBlockHeaders (eth/68)."""
+    return encode([request_id, [start_hash, limit, skip, int(reverse)]])
+
+
+def encode_block_headers(request_id: int, headers: list[bytes]) -> bytes:
+    """eth request/response pair for BlockHeaders (eth/68)."""
+    return encode([request_id, headers])
+
+
+def encode_block_bodies(request_id: int, bodies: list[bytes]) -> bytes:
+    """eth request/response pair for BlockBodies (eth/68)."""
+    return encode([request_id, bodies])

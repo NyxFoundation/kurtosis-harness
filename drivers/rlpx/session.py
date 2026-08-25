@@ -28,6 +28,10 @@ MSG_PONG = 0x03
 ETH_STATUS = 0x10
 ETH_NEW_BLOCK_HASHES = 0x11
 ETH_NEW_POOLED_TX_HASHES = 0x18
+ETH_GET_BLOCK_HEADERS = 0x13
+ETH_BLOCK_HEADERS = 0x14
+ETH_GET_BLOCK_BODIES = 0x15
+ETH_BLOCK_BODIES = 0x16
 
 
 def _snappy_compress(data: bytes) -> bytes:
@@ -47,7 +51,7 @@ class Session:
         self.port = port
         self.remote_pub = c.pubkey_from_bytes(remote_pubkey64)
         self.static = our_static or c.gen_private_key()
-        self.caps = caps or [[b"eth", 68], [b"eth", 67]]
+        self.caps = caps or [[b"eth", 69], [b"eth", 68], [b"eth", 67]]
         self.sock: socket.socket | None = None
         self.codec: FrameCodec | None = None
         self.snappy = False  # enabled after the p2p Hello exchange
@@ -110,7 +114,9 @@ class Session:
         return msg_id, decoded
 
     # --- eth Status handshake ---------------------------------------------
-    def eth_status(self) -> tuple[int, list]:
+    def eth_status(self, *, advertised_head: bytes | None = None,
+                   advertised_td: int | None = None,
+                   advertised_latest: int | None = None) -> tuple[int, list]:
         """Read the peer's Status and reply with a compatible one.
 
         Echoes the peer's network id / genesis / fork id / head so reth accepts
@@ -120,18 +126,33 @@ class Session:
         msg_id, payload = self.read_msg()
         if msg_id != ETH_STATUS:
             return msg_id, decode(payload) if payload else []
-        version, netid, td, head, genesis, forkid = decode(payload)[:6]
-        ours = encode([0x44, netid, td, head, genesis, forkid])  # eth/68
+        fields = decode(payload)
+        version = int.from_bytes(fields[0], "big") if fields[0] else 0
+        if version >= 69 and len(fields) >= 7:
+            _, netid, genesis, forkid, earliest, latest, head = fields[:7]
+            ours = encode([
+                version, netid, genesis, forkid, earliest,
+                advertised_latest if advertised_latest is not None else latest,
+                advertised_head or head,
+            ])
+        else:
+            version, netid, td, head, genesis, forkid = fields[:6]
+            ours = encode([0x44, netid, advertised_td if advertised_td is not None else td,
+                           advertised_head or head, genesis, forkid])  # eth/68
         self.write_msg(ETH_STATUS, ours)
-        return msg_id, [version, netid, td, head, genesis, forkid]
+        return msg_id, fields
 
-    def handshake(self, timeout: float = 10.0):
+    def handshake(self, timeout: float = 10.0, *, advertised_head: bytes | None = None,
+                  advertised_td: int | None = None,
+                  advertised_latest: int | None = None):
         """Full bring-up: connect + Hello + eth Status. Returns peer Status."""
         self.connect(timeout=timeout)
         hid, _ = self.hello()
         if hid != MSG_HELLO:
             raise ConnectionError(f"no Hello (got msg id {hid})")
-        sid, status = self.eth_status()
+        sid, status = self.eth_status(advertised_head=advertised_head,
+                                      advertised_td=advertised_td,
+                                      advertised_latest=advertised_latest)
         if sid != ETH_STATUS:
             raise ConnectionError(f"no eth Status (got msg id {sid})")
         return status

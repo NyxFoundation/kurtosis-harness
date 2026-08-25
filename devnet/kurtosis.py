@@ -222,7 +222,14 @@ class KurtosisHarness:
                         result = json.loads(urllib.request.urlopen(req, timeout=10).read())["result"]
                         enode = result.get("enode", "")
                         if enode and "@127.0.0.1" not in enode:
-                            enode = re.sub(r"@[^:]+:(\d+)$", f"@127.0.0.1:{p2p_port}", enode)
+                            # Erigon appends `?discport=0` to dev-mode enodes;
+                            # normalize the advertised port while retaining
+                            # any query suffix used by the RLPx driver.
+                            enode = re.sub(
+                                r"@[^:]+:(\d+)(\?.*)?$",
+                                f"@127.0.0.1:{p2p_port}\\2",
+                                enode,
+                            )
                     except Exception:
                         time.sleep(2)
             return DriverTarget(
@@ -230,6 +237,7 @@ class KurtosisHarness:
                 rpc_url=f"http://127.0.0.1:{rpc_port}" if rpc_port else "",
                 engine_url=f"http://127.0.0.1:{engine_port}" if engine_port else "",
                 jwt_secret=jwt,
+                container_id=cid,
             )
         raise DevnetUnavailable(f"unknown client layer for {spec.client!r}")
 

@@ -1,0 +1,3 @@
+name: "github.com/nyx-foundation/reth-staged-bal"
+description: |
+  Two-service Reth Amsterdam target used to exercise the staged importer.
